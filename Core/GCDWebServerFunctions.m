@@ -250,51 +250,47 @@ NSString* GCDWebServerStringFromSockAddr(const struct sockaddr* addr, BOOL inclu
 }
 
 NSString* GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
-  NSString* address = nil;
-#if TARGET_OS_IPHONE
-#if !TARGET_IPHONE_SIMULATOR && !TARGET_OS_TV
-  const char* primaryInterface = "en0";  // WiFi interface on iOS
-#endif
-#else
-  const char* primaryInterface = NULL;
-  SCDynamicStoreRef store = SCDynamicStoreCreate(kCFAllocatorDefault, CFSTR("GCDWebServer"), NULL, NULL);
-  if (store) {
-    CFPropertyListRef info = SCDynamicStoreCopyValue(store, CFSTR("State:/Network/Global/IPv4"));  // There is no equivalent for IPv6 but the primary interface should be the same
-    if (info) {
-      NSString* interface = [(__bridge NSDictionary*)info objectForKey:@"PrimaryInterface"];
-      if (interface) {
-        primaryInterface = [[NSString stringWithString:interface] UTF8String];  // Copy string to auto-release pool
-      }
-      CFRelease(info);
+    NSString *address = nil;
+    struct ifaddrs *interfaces = NULL;
+
+    // 获取网络接口列表
+    if (getifaddrs(&interfaces) == 0) {
+        struct ifaddrs *currentInterface = interfaces;
+
+        while (currentInterface != NULL) {
+            // 确保接口处于 UP 状态并正在运行
+            BOOL isUp = (currentInterface->ifa_flags & IFF_UP) != 0;
+            BOOL isRunning = (currentInterface->ifa_flags & IFF_RUNNING) != 0;
+
+            if (!isUp || !isRunning) {
+                currentInterface = currentInterface->ifa_next;
+                continue;
+            }
+
+            // 检查地址族 (IPv4 或 IPv6)
+            sa_family_t family = currentInterface->ifa_addr->sa_family;
+            if ((!useIPv6 && family == AF_INET) || (useIPv6 && family == AF_INET6)) {
+                char hostname[NI_MAXHOST];
+                int result = getnameinfo(currentInterface->ifa_addr,
+                                         (family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6),
+                                         hostname, NI_MAXHOST,
+                                         NULL, 0, NI_NUMERICHOST);
+                if (result == 0) {
+                    address = [NSString stringWithUTF8String:hostname];
+                    break;
+                }
+            }
+
+            currentInterface = currentInterface->ifa_next;
+        }
+
+        // 释放接口列表
+        freeifaddrs(interfaces);
     }
-    CFRelease(store);
-  }
-  if (primaryInterface == NULL) {
-    primaryInterface = "lo0";
-  }
-#endif
-  struct ifaddrs* list;
-  if (getifaddrs(&list) >= 0) {
-    for (struct ifaddrs* ifap = list; ifap; ifap = ifap->ifa_next) {
-#if TARGET_IPHONE_SIMULATOR || TARGET_OS_TV
-      // Assume en0 is Ethernet and en1 is WiFi since there is no way to use SystemConfiguration framework in iOS Simulator
-      // Assumption holds for Apple TV running tvOS
-      if (strcmp(ifap->ifa_name, "en0") && strcmp(ifap->ifa_name, "en1"))
-#else
-      if (strcmp(ifap->ifa_name, primaryInterface))
-#endif
-      {
-        continue;
-      }
-      if ((ifap->ifa_flags & IFF_UP) && ((!useIPv6 && (ifap->ifa_addr->sa_family == AF_INET)) || (useIPv6 && (ifap->ifa_addr->sa_family == AF_INET6)))) {
-        address = GCDWebServerStringFromSockAddr(ifap->ifa_addr, NO);
-        break;
-      }
-    }
-    freeifaddrs(list);
-  }
-  return address;
+
+    return address;
 }
+
 
 NSString* GCDWebServerComputeMD5Digest(NSString* format, ...) {
   va_list arguments;
